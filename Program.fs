@@ -13,7 +13,7 @@ let OPENAI_API_KEY = Environment.GetEnvironmentVariable "OPENAI_API_KEY"
 type Item =
     | Empty
     | Done
-    | Reason of string
+    | StopReason of string
     | Partial of string
     | Error
 
@@ -35,7 +35,7 @@ let parse =
                 | _ ->
                     match choice.GetProperty("finish_reason").GetString() with
                     | "" | null -> Empty
-                    | reason -> Reason reason
+                    | reason -> StopReason reason
 
             with
             | :? JsonException ->
@@ -46,7 +46,7 @@ let parse =
         | _ ->
             Error
 
-let openai (msg: string) =
+let openai key (msg: string) =
     let body = JsonSerializer.Serialize {|
         model = "gpt-3.5-turbo"
         messages = [|
@@ -62,43 +62,35 @@ let openai (msg: string) =
         "https://api.openai.com/v1/chat/completions"
         "-N"
         "-H"; "Content-Type: application/json"
-        "-H"; $"Authorization: Bearer {OPENAI_API_KEY}"
+        "-H"; $"Authorization: Bearer {key}"
         "--data-binary"; body
     ]
 
-    let req = proc("curl", args)
+    proc("curl", args)
 
-    { req with
-        stdout = req <!> Stdout |> transform (fun write line ->
-            match parse line with
-            | Partial x ->
-                write x
-            | Done ->
-                write "\n" // make sure we have at least one newline
-            | Reason "limit" ->
-                slogn [
-                    fg Color.Red
-                    bg Color.White
-                ] "[Token limit]"
-            | Error ->
-               slogn [fg Color.White; bg Color.Red] line
-            | Reason _ | Empty -> ()
-            )
-    }
+match OPENAI_API_KEY with
+| "" | null -> eprintfn "Missing OPENAI_API_KEY"
+| key ->
+    let prompt = 
+        let stdin = host.stdin |> readNow
+        let arg = Environment.GetCommandLineArgs() |> Array.tryItem 1
 
-let show (x: Proc) =
-    x <!> Stdout |> consume log
-    x.proc.WaitForExit()
+        match stdin, arg with
+        | stdin, Some arg -> stdin + "\n" + arg
+        | stdin, _ -> stdin
 
-    if x.proc.ExitCode <> 0 then
-        x <!> Stderr |> consume (slogn [fg Color.Red])
-
-let prompt = 
-    let stdin = host.stdin |> readNow
-    let arg = Environment.GetCommandLineArgs() |> Array.tryItem 1
-
-    match stdin, arg with
-    | stdin, Some arg -> stdin + "\n" + arg
-    | stdin, _ -> stdin
-
-prompt |> openai |> show
+    prompt
+    |> openai key <!> Stdout
+    |> consume (fun line ->
+        match parse line with
+        | Partial x ->
+            log x
+        | StopReason "limit" ->
+            slogn [
+                fg Color.Red
+                bg Color.White
+            ] "[token limit]"
+        | Error ->
+            eprintf "%s" line
+        | _ -> ()
+    )
