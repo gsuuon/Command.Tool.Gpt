@@ -17,34 +17,37 @@ type Item =
     | Partial of string
     | Error
 
-let parse =
-    function
-    | "" | null -> Empty
-    | x when x.Trim() = "" -> Empty
-    | evtText ->
-        match Regex.Match(evtText, "data: (.+)") with
-        | m when m.Success ->
-            let data = m.Groups.[1].Value
+let (|RegexMatches|_|) reg x =
+    match Regex.Match(x, reg) with
+    | m when m.Success -> Some m.Groups
+    | _ -> None
+    
+let parse line =
+    match line with
+    | "" | null | _ when line.Trim() = "" -> Empty
+    | RegexMatches "data: (.+)" m ->
+        let data = m.[1].Value
 
-            try
-                let choice = (JsonDocument.Parse data).RootElement.GetProperty("choices").[0]
+        try
+            let choice =
+                (JsonDocument.Parse data)
+                    .RootElement.GetProperty("choices").[0]
 
-                match choice.GetProperty("delta").TryGetProperty("content") with
-                | true, content ->
-                    Partial <| content.GetString()
-                | _ ->
-                    match choice.GetProperty("finish_reason").GetString() with
-                    | "" | null -> Empty
-                    | reason -> StopReason reason
+            match choice.GetProperty("delta").TryGetProperty("content") with
+            | true, content -> content.GetString() |> Partial
+            | _ ->
+                match choice.GetProperty("finish_reason").GetString() with
+                | "" | null -> Empty
+                | reason -> StopReason reason
 
-            with
-            | :? JsonException ->
-                match m.Value with
-                | "[DONE]" -> Done
-                | x -> failwithf "Unparsed response: %s" x
-            | e -> reraise ()
-        | _ ->
-            Error
+        with
+        | :? JsonException ->
+            match data with
+            | "[DONE]" -> Done
+            | x -> failwithf "Unparsed response: %s" x
+        | e -> reraise ()
+    | _ ->
+        Error
 
 let openai key (msg: string) =
     let body = JsonSerializer.Serialize {|
